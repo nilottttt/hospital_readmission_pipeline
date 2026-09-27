@@ -1,0 +1,4 @@
+# Versions chosen to be compatible with Airflow 2.10.5 (which uses SQLAlchemy 1.4 and numpy 1.26)
+pandas==2.1.4
+requests>=2.31
+psycopg2-binary>=2.9

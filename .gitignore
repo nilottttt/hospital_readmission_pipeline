@@ -1,0 +1,18 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Airflow runtime files
+logs/*
+!logs/.gitkeep
+
+# Data files (the pipeline downloads them; do not commit data)
+data/raw/*
+!data/raw/.gitkeep
+data/manual/*
+!data/manual/.gitkeep
+data/rejected/*
+!data/rejected/.gitkeep

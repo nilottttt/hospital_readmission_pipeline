@@ -1,0 +1,13 @@
+# Local development only (running tests / the CLI pipeline / the dashboard
+# outside Docker). Inside Docker the images install their own requirements.
+#   python -m venv .venv
+#   .venv\Scripts\activate          (Windows)
+#   pip install -r requirements.txt
+pandas>=2.1
+numpy>=1.26
+requests>=2.31
+psycopg2-binary>=2.9
+SQLAlchemy>=2.0
+streamlit>=1.38
+plotly>=5.22
+pytest>=8.0
