@@ -56,7 +56,7 @@ ALTER TABLE mart.dim_patient ADD PRIMARY KEY (patient_sk);
 -- Admission fact
 CREATE TABLE mart.fact_admission AS
 SELECT
-    encounter_sk, patient_sk, encounter_seq,
+    encounter_sk, patient_sk, encounter_seq, encounter_order,
     admission_type_id, discharge_disposition_id, admission_source_id,
     age_group, age_group_order, age_midpoint, gender, race, payer_code,
     medical_specialty, department,
@@ -66,6 +66,7 @@ SELECT
     number_outpatient, number_emergency, number_inpatient,
     prior_admissions, prior_encounters_in_data,
     diag_1_category AS primary_diagnosis_category,
+    diag_2_category, diag_3_category,
     number_diagnoses, diagnosis_count,
     max_glu_serum, a1c_result,
     medication_count, medication_change_count, insulin, med_changed, diabetes_med,
@@ -154,3 +155,26 @@ SELECT f.encounter_sk, f.patient_sk, f.age_group, f.gender, f.department,
        f.risk_score, f.readmitted
 FROM mart.fact_admission f
 WHERE f.risk_level = 'High';
+
+-- ---------------- ML feature view (Part 2) --------------------------
+-- One row per encounter: model inputs + label + split order + subgroup
+-- columns. The training pipeline reads ONLY from this view, so the
+-- feature definition lives in one reproducible place.
+CREATE OR REPLACE VIEW mart.v_ml_features AS
+SELECT
+    f.encounter_sk, f.patient_sk, f.encounter_order,
+    -- numeric features
+    f.age_midpoint, f.length_of_stay_days, f.num_lab_procedures, f.num_procedures,
+    f.num_medications, f.number_outpatient, f.number_emergency, f.number_inpatient,
+    f.prior_admissions, f.prior_encounters_in_data, f.number_diagnoses,
+    f.diagnosis_count, f.medication_count, f.medication_change_count,
+    f.med_changed::int AS med_changed, f.diabetes_med::int AS diabetes_med,
+    -- categorical features
+    f.gender, f.admission_type, f.admission_source_group, f.discharge_group,
+    f.department, f.primary_diagnosis_category, f.diag_2_category, f.diag_3_category,
+    f.max_glu_serum, f.a1c_result, f.insulin,
+    -- subgroup columns (monitoring only, NOT model inputs)
+    f.race, f.age_group,
+    -- label
+    f.readmitted_30d::int AS label_readmitted_30d
+FROM mart.fact_admission f;

@@ -7,6 +7,8 @@ Run inside Docker (http://localhost:8501) or locally:
 """
 import os
 
+import requests
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -132,7 +134,8 @@ k[3].metric("Average length of stay", f"{df['length_of_stay_days'].mean():.1f} d
 k[4].metric("High-risk encounters", f"{(df['risk_level'] == 'High').mean():.1%}")
 
 tabs = st.tabs(["1 · Readmission by age", "2 · Diagnosis & department", "3 · Length of stay",
-                "4 · Admission & discharge", "5 · High-risk cohort", "6 · Data quality & pipeline"])
+                "4 · Admission & discharge", "5 · High-risk cohort", "6 · Data quality & pipeline",
+                "7 · Risk prediction (ML)", "8 · Model performance & monitoring"])
 
 # ---------------------------------------------------------------- 1. age
 with tabs[0]:
@@ -315,3 +318,258 @@ with tabs[5]:
                        ORDER BY check_id""")
         st.subheader("Data-quality checks (latest successful run)")
         st.dataframe(dq, use_container_width=True, hide_index=True)
+
+# =====================================================================
+# PART 2 - MLOps: prediction service and model monitoring
+# =====================================================================
+API_URL = os.getenv("API_URL", "http://localhost:8000")
+MLFLOW_UI_URL = os.getenv("MLFLOW_UI_URL", "http://localhost:5000")
+MODEL_COLORS = {"logistic_regression": "#2a78d6", "random_forest": "#eb6834", "xgboost": "#1baf7a"}
+MODEL_LABELS = {"logistic_regression": "Logistic Regression", "random_forest": "Random Forest",
+                "xgboost": "XGBoost"}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def query_fresh(sql: str) -> pd.DataFrame:
+    with get_engine().connect() as conn:
+        return pd.read_sql(text(sql), conn)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def api_model_info():
+    try:
+        r = requests.get(f"{API_URL}/model-info", timeout=10)
+        return r.json() if r.status_code == 200 else None
+    except requests.RequestException:
+        return None
+
+
+def table_exists(name: str) -> bool:
+    return bool(query_fresh(f"SELECT to_regclass('{name}') IS NOT NULL AS ok")["ok"][0])
+
+
+# ---------------------------------------------------------------- 7. prediction
+with tabs[6]:
+    info = api_model_info()
+    if info is None:
+        st.warning(f"The prediction API ({API_URL}) is not reachable or has no champion model yet. "
+                   "Run the **readmission_model_training** DAG in Airflow first.")
+    else:
+        m = info.get("test_metrics", {})
+        c = st.columns(5)
+        c[0].metric(f"Served model (v{info['version']})", MODEL_LABELS.get(info["model_type"], info["model_type"]))
+        c[1].metric("Test ROC-AUC", f"{m.get('roc_auc', float('nan')):.3f}")
+        c[2].metric("Test recall", f"{m.get('recall', float('nan')):.1%}")
+        c[3].metric("Test precision", f"{m.get('precision', float('nan')):.1%}")
+        c[4].metric("Decision threshold", f"{info['threshold']:.1%}")
+        st.caption("⚠️ Academic decision-support prototype trained on 1999–2008 public data. "
+                   "Not validated for clinical use; it must not replace clinical judgement.")
+
+        cats = info.get("categories", {})
+
+        def opts(name, default=None):
+            values = cats.get(name) or [default or "Unknown"]
+            return values, (values.index(default) if default in values else 0)
+
+        with st.form("predict_form"):
+            st.markdown("**Describe the encounter**")
+            a, b, cc = st.columns(3)
+            with a:
+                st.markdown("*Patient & admission*")
+                age = st.selectbox("Age group", AGE_ORDER, index=7)
+                gender = st.selectbox("Gender", *opts("gender", "Female"))
+                adm_type = st.selectbox("Admission type", *opts("admission_type", "Emergency"))
+                adm_src = st.selectbox("Admitted from", *opts("admission_source_group", "Emergency Room"))
+                dept = st.selectbox("Department", *opts("department", "Internal Medicine"))
+                disch = st.selectbox("Discharge destination", *opts("discharge_group", "Home"))
+            with b:
+                st.markdown("*Stay & diagnoses*")
+                los = st.slider("Length of stay (days)", 1, 14, 5)
+                labs = st.number_input("Lab procedures", 0, 150, 45)
+                procs = st.number_input("Other procedures", 0, 6, 1)
+                n_meds = st.number_input("Distinct medications given", 1, 80, 16)
+                n_diag = st.slider("Number of diagnoses recorded", 1, 16, 8)
+                diag1 = st.selectbox("Primary diagnosis", *opts("primary_diagnosis_category", "Circulatory"))
+                diag2 = st.selectbox("Secondary diagnosis", *opts("diag_2_category", "Diabetes"))
+                diag3 = st.selectbox("Additional diagnosis", *opts("diag_3_category", "Circulatory"))
+            with cc:
+                st.markdown("*History & diabetes care*")
+                outp = st.number_input("Outpatient visits (past year)", 0, 40, 0)
+                emer = st.number_input("Emergency visits (past year)", 0, 40, 0)
+                inp = st.number_input("Inpatient admissions (past year)", 0, 20, 1)
+                prior_enc = st.number_input("Earlier encounters in this system", 0, 40, 0)
+                a1c = st.selectbox("HbA1c result", *opts("a1c_result", "Not measured"))
+                glu = st.selectbox("Max glucose serum", *opts("max_glu_serum", "Not measured"))
+                insulin = st.selectbox("Insulin", *opts("insulin", "Steady"))
+                med_count = st.number_input("Diabetes drugs prescribed", 0, 23, 1)
+                med_changes = st.number_input("Diabetes drug dose changes", 0, 23, 0)
+                diabetes_med = st.checkbox("On diabetes medication", True)
+            submitted = st.form_submit_button("Predict 30-day readmission risk", type="primary")
+
+        if submitted:
+            encounter = {
+                "age_midpoint": int(age.split("-")[0]) + 5, "length_of_stay_days": los,
+                "num_lab_procedures": labs, "num_procedures": procs, "num_medications": n_meds,
+                "number_outpatient": outp, "number_emergency": emer, "number_inpatient": inp,
+                "prior_admissions": outp + emer + inp, "prior_encounters_in_data": prior_enc,
+                "number_diagnoses": n_diag, "diagnosis_count": sum(d != "Missing" for d in (diag1, diag2, diag3)),
+                "medication_count": med_count, "medication_change_count": med_changes,
+                "med_changed": int(med_changes > 0), "diabetes_med": int(diabetes_med),
+                "gender": gender, "admission_type": adm_type, "admission_source_group": adm_src,
+                "discharge_group": disch, "department": dept, "primary_diagnosis_category": diag1,
+                "diag_2_category": diag2, "diag_3_category": diag3, "max_glu_serum": glu,
+                "a1c_result": a1c, "insulin": insulin}
+            try:
+                r = requests.post(f"{API_URL}/predict", json={"encounter": encounter, "explain": True,
+                                                              "source": "dashboard"}, timeout=30)
+                r.raise_for_status()
+                pred = r.json()
+            except requests.RequestException as exc:
+                st.error(f"Prediction failed: {exc}")
+                pred = None
+            if pred:
+                icon = {"High": "🔴", "Medium": "🟠", "Low": "🟢"}[pred["risk_band"]]
+                r1 = st.columns(4)
+                r1[0].metric("Predicted 30-day readmission risk", f"{pred['probability']:.1%}")
+                r1[1].metric("Risk band", f"{icon} {pred['risk_band']}")
+                r1[2].metric("Average risk (training data)", f"{info['base_rate']:.1%}")
+                r1[3].metric(f"Flag for follow-up? (threshold {pred['threshold']:.1%})",
+                             "Yes" if pred["flagged"] else "No")
+                if pred["dq_flags"]:
+                    st.warning("Input-quality flags (outside the training data): " + ", ".join(pred["dq_flags"]))
+                fac = pd.DataFrame(pred["top_factors"])
+                if len(fac):
+                    fac["effect"] = fac["contribution"].map(lambda v: "raises risk" if v > 0 else "lowers risk")
+                    fac["label"] = fac.apply(lambda r: f"{r['feature']} = {r['value']}", axis=1)
+                    fac = fac.iloc[::-1]
+                    fig = px.bar(fac, x="contribution", y="label", orientation="h", color="effect",
+                                 color_discrete_map={"raises risk": "#eb6834", "lowers risk": "#2a78d6"},
+                                 labels={"contribution": "Contribution to the prediction (SHAP value)", "label": ""},
+                                 title="Why? Top factors behind this prediction")
+                    st.plotly_chart(style(fig, 320), use_container_width=True)
+                st.caption(f"Model {pred['model_name']} v{pred['model_version']} · request {pred['request_id']} · "
+                           f"{pred['latency_ms']:.0f} ms · logged for monitoring")
+
+# ---------------------------------------------------------------- 8. performance & monitoring
+with tabs[7]:
+    if not table_exists("mlops.training_runs"):
+        st.info("No model has been trained yet. Run the **readmission_model_training** DAG in Airflow.")
+        st.stop()
+    runs = query_fresh("SELECT * FROM mlops.training_runs ORDER BY trained_at DESC, id")
+    latest_id = runs["training_id"].iloc[0]
+    latest = runs[runs["training_id"] == latest_id].copy()
+    latest["model"] = latest["model_type"].map(MODEL_LABELS)
+    sel = latest[latest["selected"]].iloc[0]
+
+    st.subheader("Model comparison (latest training run)")
+    st.caption(f"Chronological split: train {int(sel.n_train):,} · validation {int(sel.n_valid):,} · "
+               f"test {int(sel.n_test):,} encounters. Selected by validation ROC-AUC; numbers below are on "
+               f"the untouched test set. [Open MLflow]({MLFLOW_UI_URL}) for every run, plot and model version.")
+    c1, c2 = st.columns([3, 2])
+    long = latest.melt(id_vars=["model", "model_type"],
+                       value_vars=["test_roc_auc", "test_pr_auc", "test_recall", "test_precision", "test_f1"],
+                       var_name="metric", value_name="value")
+    long["metric"] = long["metric"].str.replace("test_", "").str.upper().str.replace("_", "-")
+    fig = px.bar(long, x="metric", y="value", color="model", barmode="group", text_auto=".2f",
+                 color_discrete_map={MODEL_LABELS[k]: v for k, v in MODEL_COLORS.items()},
+                 category_orders={"model": list(MODEL_LABELS.values())},
+                 labels={"metric": "", "value": "Score (test set)", "model": ""},
+                 title="Test-set metrics by model")
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    c1.plotly_chart(style(fig, 400), use_container_width=True)
+    tbl = latest[["model", "val_roc_auc", "test_roc_auc", "test_pr_auc", "test_recall", "test_precision",
+                  "test_f1", "test_brier", "test_ece_uncalibrated", "test_ece", "threshold", "selected"]].copy()
+    tbl.columns = ["Model", "Val AUC", "Test AUC", "Test PR-AUC", "Recall", "Precision", "F1", "Brier",
+                   "ECE before calib.", "ECE after calib.", "Threshold", "Selected"]
+    c2.dataframe(tbl.round(4), hide_index=True, use_container_width=True)
+    c2.markdown(f"**Registry:** `{sel.model_type}` registered as version **{sel.registered_version}** — "
+                f"{sel.decision}")
+    c2.caption("Class weighting inflates raw probabilities; isotonic calibration on the validation set "
+               "brings the expected calibration error (ECE) close to zero.")
+
+    st.divider()
+    st.subheader("Production monitoring")
+    mon = query_fresh("SELECT * FROM mlops.monitoring_runs ORDER BY run_at") if table_exists("mlops.monitoring_runs") else pd.DataFrame()
+    if mon.empty:
+        st.info("No monitoring run yet. Trigger the **readmission_model_monitoring** DAG in Airflow.")
+        st.stop()
+    last = mon.iloc[-1]
+    k = st.columns(6)
+    k[0].metric("Predictions (window)", f"{int(last.n_predictions or 0):,}")
+    k[1].metric("With known outcome", f"{int(last.n_labeled or 0):,}")
+    if pd.notna(last.roc_auc):
+        k[2].metric("ROC-AUC (live)", f"{last.roc_auc:.3f}",
+                    f"{last.roc_auc - last.reference_roc_auc:+.3f} vs test" if pd.notna(last.reference_roc_auc) else None)
+        k[3].metric("Calibration ECE", f"{last.ece:.3f}")
+    k[4].metric("Max feature PSI", f"{last.max_psi:.2f}" if pd.notna(last.max_psi) else "–")
+    k[5].metric("p95 latency · error rate",
+                (f"{last.p95_latency_ms:.0f} ms · {last.error_rate:.1%}" if pd.notna(last.p95_latency_ms) else "–"))
+    alerts = last.alerts if isinstance(last.alerts, list) else []
+    if last.retrain_recommended:
+        st.error("🔁 **Retraining recommended**" + (" — training DAG triggered." if last.retrain_triggered
+                                                       else " (not triggered: cool-down period or manual decision)."))
+    for a in alerts:
+        st.warning(f"⚠️ {a}")
+    if not alerts:
+        st.success("✅ No alerts in the latest monitoring run.")
+
+    c1, c2 = st.columns(2)
+    drift = query_fresh(f"SELECT feature, psi, status FROM mlops.drift_metrics "
+                        f"WHERE monitoring_id = '{last.monitoring_id}' ORDER BY psi")
+    if len(drift):
+        fig = px.bar(drift, x="psi", y="feature", orientation="h", color_discrete_sequence=[BLUE],
+                     hover_data={"status": True}, labels={"psi": "Population Stability Index", "feature": ""},
+                     title="Input drift vs. training data (PSI)")
+        fig.add_vline(x=0.10, line_dash="dot", line_color="grey", annotation_text="0.10 warning",
+                      annotation_position="bottom right", annotation_font_size=10)
+        fig.add_vline(x=0.25, line_dash="dash", line_color="grey", annotation_text="0.25 drift",
+                      annotation_position="bottom right", annotation_font_size=10)
+        c1.plotly_chart(style(fig, 560), use_container_width=True)
+    if len(mon) > 1:
+        specs = [("roc_auc", "Live ROC-AUC", [0.5, 0.85]),
+                 ("ece", "Calibration error (ECE)", [0, max(0.15, float(mon["ece"].max() or 0) * 1.2)]),
+                 ("max_psi", "Largest feature drift (PSI)", [0, max(0.6, float(mon["max_psi"].max() or 0) * 1.2)])]
+        for measure, title, yr in specs:
+            part = mon[["run_at", measure]].dropna()
+            if len(part):
+                fig = px.line(part, x="run_at", y=measure, markers=True, color_discrete_sequence=[BLUE],
+                              labels={"run_at": "", measure: ""}, title=f"{title} per monitoring run")
+                fig.update_traces(line_width=2, marker_size=8)
+                fig.update_yaxes(range=yr)
+                c2.plotly_chart(style(fig, 180), use_container_width=True)
+    else:
+        c2.info("Trends appear after the second monitoring run.")
+
+    st.markdown("**Subgroup performance (fairness check)** — live window vs. test-set baseline")
+    sub = query_fresh(f"""SELECT monitoring_id, group_type, group_value, n, positives, roc_auc, recall, precision,
+                                 flag_rate, mean_predicted, observed_rate
+                          FROM mlops.subgroup_metrics
+                          WHERE monitoring_id IN ('{last.monitoring_id}', 'training:v{last.model_version}')""")
+    if len(sub):
+        sub["period"] = sub["monitoring_id"].map(lambda m: "test-set baseline" if m.startswith("training") else "live window")
+        gt = st.radio("Group by", ["age_group", "gender", "race"], horizontal=True)
+        part = sub[sub["group_type"] == gt].sort_values("group_value")
+        fig = px.bar(part, x="group_value", y="recall", color="period", barmode="group",
+                     color_discrete_map={"test-set baseline": "#86b6ef", "live window": "#2a78d6"},
+                     hover_data={"n": ":,", "positives": True, "precision": ":.2f", "roc_auc": ":.3f"},
+                     labels={"group_value": gt.replace("_", " ").title(), "recall": "Recall (share of readmissions caught)",
+                             "period": ""}, title=f"Recall by {gt.replace('_', ' ')}")
+        st.plotly_chart(style(fig, 360), use_container_width=True)
+        st.dataframe(part.drop(columns=["monitoring_id"]).round(3), hide_index=True, use_container_width=True)
+
+    vol = query_fresh("""SELECT date_trunc('hour', predicted_at) AS hour, source, status, COUNT(*) AS requests,
+                                percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+                         FROM mlops.prediction_log GROUP BY 1, 2, 3 ORDER BY 1""")
+    if len(vol):
+        st.markdown("**API traffic** (every request is logged in `mlops.prediction_log`)")
+        v1, v2 = st.columns(2)
+        fig = px.bar(vol, x="hour", y="requests", color="source", labels={"hour": "", "requests": "Requests"},
+                     color_discrete_sequence=["#2a78d6", "#eb6834", "#1baf7a", "#eda100"], title="Requests by source")
+        v1.plotly_chart(style(fig, 300), use_container_width=True)
+        lat = vol[(vol["status"] == "ok") & (vol["source"] != "batch")]
+        if len(lat):
+            fig = px.line(lat, x="hour", y="p95_ms", color="source", markers=True,
+                          color_discrete_sequence=["#2a78d6", "#eb6834", "#1baf7a"],
+                          labels={"hour": "", "p95_ms": "p95 latency (ms)"}, title="Interactive request latency (p95)")
+            fig.add_hline(y=500, line_dash="dash", line_color="grey", annotation_text="500 ms alert")
+            v2.plotly_chart(style(fig, 300), use_container_width=True)

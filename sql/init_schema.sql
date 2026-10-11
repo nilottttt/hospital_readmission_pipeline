@@ -178,3 +178,10 @@ CREATE TABLE IF NOT EXISTS clean.encounters (
     glipizide_metformin TEXT, glimepiride_pioglitazone TEXT,
     metformin_rosiglitazone TEXT, metformin_pioglitazone TEXT
 );
+
+-- ---------------------------------------------------------------------
+-- Part 2 additions (safe on databases created by Part 1)
+-- ---------------------------------------------------------------------
+-- Global chronological order of encounters (rank of encounter_id), used
+-- for the chronological train/validation/test split of the ML model.
+ALTER TABLE clean.encounters ADD COLUMN IF NOT EXISTS encounter_order INTEGER;

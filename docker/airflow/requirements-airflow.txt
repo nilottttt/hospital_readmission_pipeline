@@ -1,4 +1,18 @@
-# Versions chosen to be compatible with Airflow 2.10.5 (which uses SQLAlchemy 1.4 and numpy 1.26)
+# Versions chosen to be compatible with Airflow 2.10.5 (SQLAlchemy 1.4, numpy 1.26,
+# protobuf 4.25, cloudpickle 2.2) and identical to docker/api/requirements-api.txt
+# so a model trained here loads exactly the same in the API.
+
+# Part 1 - ETL
 pandas==2.1.4
-requests>=2.31
-psycopg2-binary>=2.9
+numpy==1.26.4
+requests==2.32.3
+psycopg2-binary==2.9.10
+
+# Part 2 - ML training, tracking and explainability
+scikit-learn==1.6.1
+xgboost-cpu==2.1.4   # CPU-only build (the default wheel pulls ~470 MB of GPU libraries)
+shap==0.46.0
+matplotlib==3.9.4
+cloudpickle==2.2.1
+protobuf==4.25.6
+mlflow-skinny==2.22.0

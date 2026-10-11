@@ -4,6 +4,8 @@
 #   airflow-webserver : Airflow UI  -> http://localhost:8080
 #   airflow-scheduler : runs the DAG tasks
 #   dashboard         : Streamlit   -> http://localhost:8501
+#   mlflow            : MLflow tracking server + model registry -> http://localhost:5000   (Part 2)
+#   api               : FastAPI inference service               -> http://localhost:8000/docs (Part 2)
 #
 # Start everything:   docker compose up -d --build
 # Stop everything:    docker compose down
@@ -30,9 +32,17 @@ x-airflow-common: &airflow-common
     HC_DB_PASSWORD: ${POSTGRES_PASSWORD}
     DATA_DIR: /opt/airflow/data
     SQL_DIR: /opt/airflow/sql
+    # Part 2
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    API_URL: http://api:8000
+    GIT_PYTHON_REFRESH: quiet
+    NUMBA_CACHE_DIR: /tmp/numba_cache
+    MPLCONFIGDIR: /tmp/matplotlib
   volumes:
     - ./dags:/opt/airflow/dags
     - ./etl:/opt/airflow/etl
+    - ./ml:/opt/airflow/ml
+    - ./scripts:/opt/airflow/scripts
     - ./sql:/opt/airflow/sql
     - ./data:/opt/airflow/data
     - ./logs:/opt/airflow/logs
@@ -108,6 +118,8 @@ services:
       HC_DB_PORT: "5432"
       HC_DB_USER: ${POSTGRES_USER}
       HC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      API_URL: http://api:8000
+      MLFLOW_UI_URL: http://localhost:5000
     volumes:
       - ./dashboard:/app/dashboard
     ports:
@@ -117,5 +129,43 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ------------------------------------------------------------- Part 2: MLOps
+  mlflow:
+    build: ./docker/mlflow
+    image: hrp-mlflow:2.22.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: hrp-api:latest
+    env_file: .env
+    environment:
+      HC_DB_HOST: postgres
+      HC_DB_PORT: "5432"
+      HC_DB_USER: ${POSTGRES_USER}
+      HC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      GIT_PYTHON_REFRESH: quiet
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  mlflow_data:

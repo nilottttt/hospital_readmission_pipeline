@@ -91,3 +91,41 @@
 | audit.ingestion_log | file per extraction attempt | extracted_at, source_name, source_url, file_name, file_path, size, sha256, status (downloaded / manual_fallback / failed), http_status, row_count, bad_line_count, message |
 | audit.rejected_records | broken rule per record | run_id, stage, source_row_num, encounter_id, rule_id, rule_description, offending_value, record (JSON, patient_nbr removed) |
 | audit.dq_check_results | check per run | layer, check_name, severity (reject / warning / critical), passed, failed_count, details |
+
+---
+
+# Part 2 additions
+
+## New columns
+| Table | Column | Meaning |
+|---|---|---|
+| clean.encounters, mart.fact_admission | encounter_order | Rank of the original `encounter_id` over all valid encounters (1 = oldest). Used as the time order for the chronological train/validation/test split. A rank reveals no original ID. |
+| mart.fact_admission | diag_2_category, diag_3_category | ICD-9 group of the secondary / additional diagnosis |
+
+## `mart.v_ml_features` (view – the only input of the training pipeline)
+| Group | Columns |
+|---|---|
+| Keys / order | encounter_sk, patient_sk, encounter_order |
+| Numeric features | age_midpoint, length_of_stay_days, num_lab_procedures, num_procedures, num_medications, number_outpatient, number_emergency, number_inpatient, prior_admissions, prior_encounters_in_data, number_diagnoses, diagnosis_count, medication_count, medication_change_count, med_changed (0/1), diabetes_med (0/1) |
+| Categorical features | gender, admission_type, admission_source_group, discharge_group, department, primary_diagnosis_category, diag_2_category, diag_3_category, max_glu_serum, a1c_result, insulin |
+| Subgroup columns (not model inputs) | race, age_group |
+| Label | label_readmitted_30d (1 = readmitted within 30 days) |
+
+## `mlops` schema
+| Table | One row per | Main columns |
+|---|---|---|
+| mlops.training_runs | candidate model per training run | training_id / mlflow_run_id (MLflow), model_type, sizes, threshold, val/test ROC-AUC, PR-AUC, precision, recall, F1, Brier, ECE before/after calibration, selected, registered_version, promoted, decision |
+| mlops.reference_profile | feature per model version | bin edges & proportions (numeric) or category shares (categorical) of the training data – the drift reference |
+| mlops.prediction_log | API request (per encounter) | request_id, predicted_at, source (api / batch / simulation / dashboard), model_version, encounter_sk (if known), features (JSON), probability, risk_band, flagged, threshold, latency_ms, status (ok / error / rejected), error, dq_flags |
+| mlops.monitoring_runs | monitoring run | window, n_predictions, n_labeled, error_rate, p50/p95 latency, dq_flag_rate, max_psi, drifted_features, live ROC-AUC vs reference, precision, recall, F1, Brier, ECE, max_subgroup_recall_gap, retrain_recommended, alerts, retrain_triggered |
+| mlops.drift_metrics | feature per monitoring run | psi, status (stable < 0.10 ≤ warning < 0.25 ≤ drift) |
+| mlops.subgroup_metrics | group value per monitoring run (`training:v<N>` = test-set baseline) | group_type (gender / race / age_group), n, positives, ROC-AUC, recall, precision, flag_rate, mean_predicted, observed_rate |
+
+## API prediction output
+| Field | Meaning |
+|---|---|
+| probability | Calibrated probability of readmission within 30 days |
+| risk_band | High (≥ threshold) · Medium (≥ training base rate) · Low |
+| flagged | probability ≥ threshold (threshold = max-F1 point on validation) |
+| top_factors | Up to 5 features with the largest SHAP contribution (positive = raises risk) |
+| dq_flags | `out_of_range:<feature>`, `unseen_category:<feature>`, `missing:<feature>` |

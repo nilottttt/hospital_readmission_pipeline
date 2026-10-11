@@ -101,3 +101,84 @@ erDiagram
 * **psycopg2 + COPY** for loading: fast (~100k rows in about 2 seconds) and independent of SQLAlchemy versions.
 * **ETL logic lives in the `etl` package**, not in the DAG file. The DAG only orchestrates, and the same code can run without Airflow (`python -m etl.run_pipeline`).
 * **Privacy:** original IDs never leave the staging layer; clean and mart only hold salted hashes. The salt lives in `.env`.
+
+---
+
+# Part 2 – MLOps extension
+
+![MLOps architecture](mlops_architecture.png)
+
+```mermaid
+flowchart LR
+    subgraph DATA[Part 1 data platform]
+        MART[(mart.v_ml_features<br/>features + label)]
+    end
+    subgraph ORCH[Airflow]
+        TD[readmission_model_training<br/>monthly / on alert]
+        MD[readmission_model_monitoring<br/>daily]
+    end
+    subgraph TRACK[MLflow server]
+        EXP[(Experiments<br/>params · metrics · plots)]
+        REG[(Model registry<br/>alias champion / previous)]
+    end
+    subgraph SERVE[Inference - Docker]
+        API[FastAPI<br/>/predict · /predict/batch<br/>/health · /metrics]
+    end
+    subgraph OBS[Monitoring store - PostgreSQL mlops]
+        PL[(prediction_log)]
+        MR[(monitoring_runs · drift_metrics<br/>subgroup_metrics)]
+        TR[(training_runs ·<br/>reference_profile)]
+    end
+    DASH[Streamlit<br/>prediction + monitoring tabs]
+
+    MART --> TD
+    TD -- LR / RF / XGBoost runs --> EXP
+    TD -- register + promote --> REG
+    TD --> TR
+    TD -- POST /reload --> API
+    REG -- load champion --> API
+    API --> PL
+    MD -- score recent batch --> API
+    PL --> MD
+    MART -- outcomes --> MD
+    MD --> MR
+    MD -. retraining criteria met .-> TD
+    DASH -- predict --> API
+    MR --> DASH
+    TR --> DASH
+```
+
+## New Airflow DAGs
+
+| DAG | Schedule | Tasks |
+|---|---|---|
+| `readmission_model_training` | `@monthly` + triggered by monitoring | init_mlops → check_training_data → train_compare_register → reload_api |
+| `readmission_model_monitoring` | `@daily` | check_api → score_recent_batch → compute_monitoring → decide → trigger_retraining / no_retraining |
+
+## New containers
+
+| Service | Image | Port | Role |
+|---|---|---|---|
+| mlflow | hrp-mlflow (python:3.11-slim + mlflow 2.22) | 5000 | Tracking server + model registry (SQLite backend and artifacts in the `mlflow_data` volume, artifacts served over HTTP) |
+| api | hrp-api (python:3.11-slim + FastAPI, scikit-learn, XGBoost, SHAP) | 8000 | Loads `models:/readmission_risk_model@champion`; logs every request |
+
+## Code layout
+
+| Path | Purpose |
+|---|---|
+| `ml/features.py` | Feature lists, chronological split, preprocessing `ColumnTransformer` |
+| `ml/train.py` | Trains and compares the 3 models, calibration, threshold, SHAP, MLflow logging, registry and promotion |
+| `ml/model.py` | `ReadmissionRiskModel`: the MLflow pyfunc packaging preprocessing, model, calibrator, threshold, explanations and input checks |
+| `ml/evaluate.py` | Metrics (ROC-AUC, PR-AUC, precision, recall, F1, Brier, ECE), subgroup metrics, plots |
+| `ml/drift.py` | Reference profiles and PSI |
+| `ml/monitoring.py` | Batch scoring, monitoring metrics, retraining decision, cool-down |
+| `api/` | FastAPI app, request/response schemas, prediction logging |
+| `sql/init_mlops.sql` | `mlops` schema |
+
+## Design decisions (Part 2)
+* **One deployable artifact.** Preprocessing, classifier, isotonic calibrator, threshold and training ranges are packaged together as an MLflow pyfunc model, so training and serving can never use different transformations.
+* **Same library versions** in the training image (Airflow) and the inference image (API): scikit-learn 1.6.1, xgboost 2.1.4, numpy 1.26.4, pandas 2.1.4, cloudpickle 2.2.1.
+* **Chronological split** (by encounter order) instead of a random split. The test set lies "in the future" of the training data, which is how the model would actually be used.
+* **Selection on validation, report on test.** The test set never influences any choice.
+* **Promotion gate.** A new model replaces the champion only if it is at least as good on the same test set.
+* **Monitoring data in PostgreSQL.** The dashboard reads it with plain SQL. MLflow remains the system of record for experiments and models.

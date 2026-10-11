@@ -1,0 +1,16 @@
+# Same versions as the training environment (docker/airflow/requirements-airflow.txt)
+# so the pickled model loads exactly as it was trained.
+numpy==1.26.4
+pandas==2.1.4
+scikit-learn==1.6.1
+xgboost-cpu==2.1.4   # CPU-only build (the default wheel pulls ~470 MB of GPU libraries)
+shap==0.46.0
+cloudpickle==2.2.1
+mlflow-skinny==2.22.0
+protobuf==4.25.6
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+pydantic==2.10.6
+prometheus-client==0.21.1
+psycopg2-binary==2.9.10
+requests==2.32.3

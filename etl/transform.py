@@ -206,6 +206,9 @@ def transform(df: pd.DataFrame, lookups: pd.DataFrame, run_id: str) -> pd.DataFr
     out["encounter_sk"] = surrogate_keys(df["encounter_id"], "enc")
     out["patient_sk"] = surrogate_keys(df["patient_nbr"], "pat")
     out["encounter_seq"] = seq
+    # global time-order proxy (1 = oldest encounter). Used for the chronological
+    # train/validation/test split in Part 2. A rank reveals no original ID.
+    out["encounter_order"] = df["encounter_id"].rank(method="first").astype("int64")
     out["run_id"] = run_id
 
     # 4) demographics

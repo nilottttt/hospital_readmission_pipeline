@@ -1,0 +1,12 @@
+# Keep the API build context small: only api/, ml/, sql/ and docker/api/ are needed
+.git
+.env
+data/
+logs/
+mlruns/
+docs/
+dashboard/
+tests/
+**/__pycache__
+.venv/
+venv/
